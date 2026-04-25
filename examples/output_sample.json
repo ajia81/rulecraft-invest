@@ -1,0 +1,10 @@
+{
+  "_TODO": [
+    "룰 엔진 실행 결과 샘플 정의",
+    "감지된 신호 목록 (rule_id, signal, severity, timestamp)",
+    "렌더링된 인사이트 문장 (LLM 다듬기 전/후)",
+    "선택된 시각화 명세 (viz_id, chart, series, data_window)",
+    "병합된 최종 룰 스냅샷 (어떤 base/extend/override가 적용되었는지)",
+    "input_sample.json의 각 자산군에 대한 출력 샘플"
+  ]
+}
