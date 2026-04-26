@@ -22,6 +22,7 @@ from engine.indicators import compute_required_indicators
 from engine.loader import load_skills
 from engine.matcher import evaluate_conditions, merge_rules
 from engine.renderer import find_template, render_insight
+from engine.validator import validate_skills
 
 
 PROJECT_ROOT = Path(__file__).parent
@@ -82,6 +83,82 @@ def _resolve_asset_name(file_name: str) -> str:
 @st.cache_data
 def _load_skills_cached(skills_path: str) -> dict:
     return load_skills(skills_path)
+
+
+@st.cache_data
+def _validate_skills_cached(skills_path: str) -> dict:
+    """Skills 검증 결과를 세션 동안 캐시. 매 분석 실행마다 재검증하지 않음."""
+    skills = load_skills(skills_path)
+    return validate_skills(skills["rules"], skills["templates"])
+
+
+def _format_violation_html(item: dict, level: str) -> str:
+    icon = "❌" if level == "error" else "⚠"
+    color = "#fca5a5" if level == "error" else "#fcd34d"
+    rule_id = item.get("rule_id", "?")
+    asset = item.get("asset_type") or ""
+    asset_label = f"<span style='opacity:0.7;'> ({asset})</span>" if asset else ""
+    msg = item.get("message", "")
+    file_hint = item.get("file_hint")
+    location = (
+        f"<div style='color:#6b7280; font-size:11px; padding-left:18px;'>↳ {file_hint}</div>"
+        if file_hint
+        else ""
+    )
+    return (
+        f"<div style='color:{color}; font-size:12px; padding:6px 0; line-height:1.5;'>"
+        f"{icon} <b>{rule_id}</b>{asset_label} — {msg}</div>"
+        f"{location}"
+    )
+
+
+def _render_validation_status(validation: dict, total_rules: int) -> None:
+    """사이드바 상단의 검증 상태 표시. 정상/경고/오류 3가지 상태."""
+    errors = validation.get("errors") or []
+    warnings = validation.get("warnings") or []
+
+    if errors:
+        st.markdown(
+            f"""
+            <div style="
+                background: #2a1414; border-left: 3px solid #dc2626; border-radius: 6px;
+                padding: 10px 14px; margin: 0 0 12px 0;
+                color: #fca5a5; font-size: 13px; font-weight: 600;
+            ">
+                ⚠️ Skills 파일 검증 실패 ({len(errors)}개 오류)
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.expander(f"오류 자세히 ({len(errors)})", expanded=False):
+            for e in errors:
+                st.markdown(_format_violation_html(e, "error"), unsafe_allow_html=True)
+        if warnings:
+            with st.expander(f"경고 자세히 ({len(warnings)})", expanded=False):
+                for w in warnings:
+                    st.markdown(_format_violation_html(w, "warning"), unsafe_allow_html=True)
+    elif warnings:
+        st.markdown(
+            f"""
+            <div style="
+                background: #2a2010; border-left: 3px solid #f59e0b; border-radius: 6px;
+                padding: 10px 14px; margin: 0 0 12px 0;
+                color: #fcd34d; font-size: 13px; font-weight: 600;
+            ">
+                ⚠ Skills 검증 경고 ({len(warnings)}개 경고)
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.expander(f"경고 자세히 ({len(warnings)})", expanded=False):
+            for w in warnings:
+                st.markdown(_format_violation_html(w, "warning"), unsafe_allow_html=True)
+    else:
+        st.markdown(
+            f"<div style='color:#6b7280; font-size:12px; margin: 0 0 12px 0;'>"
+            f"✅ Skills 검증 통과 (총 {total_rules}개 룰)</div>",
+            unsafe_allow_html=True,
+        )
 
 
 def _latest_values(df: pd.DataFrame, indicators: dict[str, pd.Series]) -> dict:
@@ -456,13 +533,25 @@ def _render_header(
 def main() -> None:
     st.set_page_config(page_title="RuleCraft Invest", layout="wide")
 
+    skills = _load_skills_cached(str(SKILLS_DIR))
+    validation = _validate_skills_cached(str(SKILLS_DIR))
+    has_errors = bool(validation.get("errors"))
+
     with st.sidebar:
         st.title("RuleCraft Invest")
         st.caption("Stage 2 — 다중 자산군 지원 (crypto, stock_kr)")
 
+        _render_validation_status(validation, total_rules=len(skills.get("rules") or []))
+
         uploaded = st.file_uploader("CSV 업로드", type=["csv"])
         asset_type = st.selectbox("자산군", options=ASSET_TYPES, index=0)
-        run = st.button("분석 실행", type="primary", width="stretch")
+        run = st.button(
+            "분석 실행",
+            type="primary",
+            width="stretch",
+            disabled=has_errors,
+            help="Skills 검증 실패 시 비활성화됩니다." if has_errors else None,
+        )
 
         st.divider()
         sample_path = SAMPLE_PATHS.get(asset_type)
@@ -498,7 +587,7 @@ def main() -> None:
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
 
-    skills = _load_skills_cached(str(SKILLS_DIR))
+    # skills는 사이드바 진입 시 이미 로드 + 검증됨 (캐시 재사용)
     merged = merge_rules(skills["rules"], asset_type=asset_type)
     templates = skills["templates"]
 
