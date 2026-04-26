@@ -548,7 +548,7 @@ def main() -> None:
         run = st.button(
             "분석 실행",
             type="primary",
-            width="stretch",
+            use_container_width=True,
             disabled=has_errors,
             help="Skills 검증 실패 시 비활성화됩니다." if has_errors else None,
         )
@@ -619,7 +619,7 @@ def main() -> None:
 
     _render_insight_cards(matches)
 
-    st.plotly_chart(_build_chart(df), width="stretch")
+    st.plotly_chart(_build_chart(df), use_container_width=True)
 
     _render_trace_section(rule_traces)
 
