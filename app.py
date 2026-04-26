@@ -29,16 +29,18 @@ PROJECT_ROOT = Path(__file__).parent
 SKILLS_DIR = PROJECT_ROOT / "skills"
 DATA_DIR = PROJECT_ROOT / "data"
 
-ASSET_TYPES = ["crypto", "stock_kr"]
+ASSET_TYPES = ["crypto", "stock_kr", "etf_us"]
 
 SAMPLE_PATHS = {
     "crypto": DATA_DIR / "sample_btc.csv",
     "stock_kr": DATA_DIR / "sample_kospi.csv",
+    "etf_us": DATA_DIR / "sample_etf.csv",
 }
 
 ASSET_NAME_OVERRIDES = {
     "sample_btc.csv": "BTC-Demo",
     "sample_kospi.csv": "DemoStock-A (KOSPI)",
+    "sample_etf.csv": "DemoETF (S&P 500-like)",
 }
 
 REQUIRED_COLUMNS = ("date", "open", "high", "low", "close", "volume")
@@ -539,7 +541,7 @@ def main() -> None:
 
     with st.sidebar:
         st.title("RuleCraft Invest")
-        st.caption("Stage 2 — 다중 자산군 지원 (crypto, stock_kr)")
+        st.caption("Stage 2 — 다중 자산군 지원 (crypto, stock_kr, etf_us)")
 
         _render_validation_status(validation, total_rules=len(skills.get("rules") or []))
 
