@@ -1,8 +1,9 @@
-"""RuleCraft Invest Streamlit 진입점 (Stage 1 MVP).
+"""RuleCraft Invest Streamlit 진입점.
 
-스코프:
-- 코인 단일 자산군
-- CSV 1개 업로드 → base + crypto override 병합 → 인사이트 1개 + 차트 1개
+Stage 2-2: 다중 자산군 지원 (crypto, stock_kr).
+- 사이드바 selectbox로 자산군 선택
+- 업로드 없을 시 자산군별 샘플(sample_btc.csv / sample_kospi.csv) 자동 매핑
+- 룰 엔진은 base.md + 모든 asset_*.md를 자동 로드 (Stage 2-2 loader)
 - LLM 호출 없음, 컬럼 자동 매핑 없음 (CSV는 표준 컬럼명 가정)
 """
 
@@ -24,7 +25,18 @@ from engine.renderer import find_template, render_insight
 PROJECT_ROOT = Path(__file__).parent
 SKILLS_DIR = PROJECT_ROOT / "skills"
 DATA_DIR = PROJECT_ROOT / "data"
-SAMPLE_PATH = DATA_DIR / "sample_btc.csv"
+
+ASSET_TYPES = ["crypto", "stock_kr"]
+
+SAMPLE_PATHS = {
+    "crypto": DATA_DIR / "sample_btc.csv",
+    "stock_kr": DATA_DIR / "sample_kospi.csv",
+}
+
+ASSET_NAME_OVERRIDES = {
+    "sample_btc.csv": "BTC-Demo",
+    "sample_kospi.csv": "DemoStock-A (KOSPI)",
+}
 
 REQUIRED_COLUMNS = ("date", "open", "high", "low", "close", "volume")
 
@@ -35,6 +47,13 @@ SEVERITY_COLORS = {
 }
 
 
+def _resolve_asset_name(file_name: str) -> str:
+    """CSV 파일명을 사용자에게 보여줄 자산명으로 변환."""
+    if file_name in ASSET_NAME_OVERRIDES:
+        return ASSET_NAME_OVERRIDES[file_name]
+    return file_name.rsplit(".", 1)[0]
+
+
 @st.cache_data
 def _load_skills_cached(skills_path: str) -> dict:
     return load_skills(skills_path)
@@ -43,33 +62,44 @@ def _load_skills_cached(skills_path: str) -> dict:
 def _latest_values(df: pd.DataFrame, indicators: dict[str, pd.Series]) -> dict:
     """마지막 행의 컬럼 값과 인디케이터 값을 dict로 묶는다.
 
-    Stage 2-1A: 문자열 인디케이터(limit_side 등)도 그대로 보존한다.
-    숫자는 float으로 정규화하고, NaN은 제외한다.
+    문자열 인디케이터(limit_side 등)는 그대로 보존, 숫자는 float으로 정규화,
+    NaN/Timestamp 등 비교 불가능한 값은 제외.
     """
     values: dict = {}
     for col in df.columns:
         last = df[col].iloc[-1]
         if isinstance(last, str):
             values[col] = last
-        elif isinstance(last, (int, float)) and not pd.isna(last):
+            continue
+        try:
+            if pd.isna(last):
+                continue
+        except (TypeError, ValueError):
+            pass
+        try:
             values[col] = float(last)
+        except (TypeError, ValueError):
+            continue
     for name, series in indicators.items():
         last = series.iloc[-1]
         if isinstance(last, str):
             values[name] = last
-        else:
-            try:
-                if pd.isna(last):
-                    continue
-            except (TypeError, ValueError):
+            continue
+        try:
+            if pd.isna(last):
                 continue
+        except (TypeError, ValueError):
+            pass
+        try:
             values[name] = float(last)
+        except (TypeError, ValueError):
+            continue
     return values
 
 
 def _evaluate_rule(
     rule: dict, df: pd.DataFrame
-) -> tuple[bool, dict[str, float]]:
+) -> tuple[bool, dict]:
     """단일 룰을 데이터에 대해 평가. 인디케이터/조건 오류는 미매칭으로 처리."""
     try:
         indicators = compute_required_indicators(rule, df)
@@ -179,14 +209,16 @@ def _render_insight_card(rule: dict, text: str) -> None:
     )
 
 
-def _render_header(source_name: str, last_date: str, last_close: float, signals: list[str]) -> None:
+def _render_header(
+    asset_name: str, last_date: str, last_close: float, signals: list[str]
+) -> None:
     left, right = st.columns([3, 2])
     with left:
         st.markdown(
             f"""
             <div style="padding: 6px 0;">
                 <div style="color:#6c7080; font-size:12px; letter-spacing:0.06em; text-transform:uppercase;">자산 · 분석일</div>
-                <div style="color:#fafafa; font-size:24px; font-weight:600; margin-top:2px;">{source_name} · {last_date}</div>
+                <div style="color:#fafafa; font-size:24px; font-weight:600; margin-top:2px;">{asset_name} · {last_date}</div>
                 <div style="color:#d8dde6; font-size:14px; margin-top:4px;">최근 종가: {last_close:,.2f}</div>
             </div>
             """,
@@ -194,7 +226,10 @@ def _render_header(source_name: str, last_date: str, last_close: float, signals:
         )
     with right:
         if signals:
-            joined = ", ".join(f"<code style='background:#1e2029; padding:2px 8px; border-radius:4px; color:#00d4ff;'>{s}</code>" for s in signals[:2])
+            joined = ", ".join(
+                f"<code style='background:#1e2029; padding:2px 8px; border-radius:4px; color:#00d4ff;'>{s}</code>"
+                for s in signals[:2]
+            )
             inner = f"<div style='color:#fafafa; font-size:18px; font-weight:600;'>{joined}</div>"
         else:
             inner = "<div style='color:#6c7080; font-size:18px;'>현재 매칭된 신호 없음</div>"
@@ -214,23 +249,24 @@ def main() -> None:
 
     with st.sidebar:
         st.title("RuleCraft Invest")
-        st.caption("Stage 1 MVP — crypto 단일 자산군")
+        st.caption("Stage 2 — 다중 자산군 지원 (crypto, stock_kr)")
 
         uploaded = st.file_uploader("CSV 업로드", type=["csv"])
-        asset_type = st.selectbox("자산군", options=["crypto"], index=0)
-        run = st.button("분석 실행", type="primary", use_container_width=True)
+        asset_type = st.selectbox("자산군", options=ASSET_TYPES, index=0)
+        run = st.button("분석 실행", type="primary", width="stretch")
 
         st.divider()
-        if SAMPLE_PATH.exists():
-            st.caption(f"업로드 없을 시 샘플 사용: `{SAMPLE_PATH.name}`")
+        sample_path = SAMPLE_PATHS.get(asset_type)
+        if sample_path is not None and sample_path.exists():
+            st.caption(f"업로드 없을 시 샘플 사용: `{sample_path.name}`")
         else:
-            st.caption("샘플 데이터 미준비 (data/sample_btc.csv 없음)")
+            st.caption(f"샘플 데이터 미준비 (자산군: {asset_type})")
 
     if not run:
         st.markdown("### 분석 결과")
         st.info(
-            "좌측 사이드바에서 CSV를 업로드하고 **분석 실행** 버튼을 눌러주세요. "
-            "업로드가 없으면 샘플 BTC 일봉 데이터가 사용됩니다."
+            "좌측 사이드바에서 자산군을 선택하고 CSV를 업로드한 뒤 **분석 실행**을 누르세요. "
+            "업로드가 없으면 자산군에 맞는 샘플 데이터가 사용됩니다."
         )
         return
 
@@ -238,15 +274,16 @@ def main() -> None:
         df = pd.read_csv(uploaded)
         source_name = uploaded.name
     else:
-        if not SAMPLE_PATH.exists():
-            st.error("업로드된 파일도, 샘플 데이터도 없습니다.")
+        sample_path = SAMPLE_PATHS.get(asset_type)
+        if sample_path is None or not sample_path.exists():
+            st.error(f"업로드된 파일도 없고, 자산군 '{asset_type}'에 대한 샘플 데이터도 없습니다.")
             return
-        df = pd.read_csv(SAMPLE_PATH)
-        source_name = SAMPLE_PATH.name
+        df = pd.read_csv(sample_path)
+        source_name = sample_path.name
 
     missing = set(REQUIRED_COLUMNS) - set(df.columns)
     if missing:
-        st.error(f"필수 컬럼 누락: {sorted(missing)}. Stage 1은 표준 컬럼명만 지원합니다.")
+        st.error(f"필수 컬럼 누락: {sorted(missing)}. 표준 컬럼명만 지원합니다.")
         return
 
     df["date"] = pd.to_datetime(df["date"])
@@ -273,8 +310,9 @@ def main() -> None:
     last_date = df["date"].iloc[-1].strftime("%Y-%m-%d")
     last_close = float(df["close"].iloc[-1])
     signals = [r.get("signal", "") for r, _ in matches]
+    asset_name = _resolve_asset_name(source_name)
 
-    _render_header(source_name, last_date, last_close, signals)
+    _render_header(asset_name, last_date, last_close, signals)
     st.divider()
 
     if matches:
@@ -293,7 +331,7 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
-    st.plotly_chart(_build_chart(df), use_container_width=True)
+    st.plotly_chart(_build_chart(df), width="stretch")
 
 
 if __name__ == "__main__":

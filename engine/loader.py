@@ -1,7 +1,9 @@
 """Skills 파일 로드와 YAML 룰 블록 파싱.
 
-Stage 1 한정: skills/base.md와 skills/asset_crypto.md만 로드한다.
-asset_stock_kr.md, asset_etf_us.md는 다음 단계에서 처리한다.
+Stage 2-2: skills/ 디렉터리 안의 모든 *.md 파일을 자동 로드한다.
+- base.md는 항상 가장 먼저 로드되어 병합 우선순위(base → asset overlay)를 보장.
+- 그 외 파일은 파일명 알파벳 순서로 일관되게 로드 (asset_crypto.md, asset_etf_us.md,
+  asset_stock_kr.md ...).
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import yaml
 
 _YAML_BLOCK_PATTERN = re.compile(r"```yaml\s*\n(.*?)\n```", re.DOTALL)
 
-_STAGE1_SKILLS = ["base.md", "asset_crypto.md"]
+_BASE_FILENAME = "base.md"
 
 
 def parse_yaml_blocks(markdown_text: str) -> list[Any]:
@@ -37,8 +39,16 @@ def parse_yaml_blocks(markdown_text: str) -> list[Any]:
     return parsed
 
 
+def _ordered_skill_files(skills_dir: Path) -> list[Path]:
+    """skills 디렉터리의 *.md 파일을 base.md 우선 + 알파벳 순서로 정렬해 반환."""
+    md_files = sorted(p for p in skills_dir.glob("*.md") if p.is_file())
+    base = [p for p in md_files if p.name == _BASE_FILENAME]
+    rest = [p for p in md_files if p.name != _BASE_FILENAME]
+    return base + rest
+
+
 def load_skills(skills_dir: str | Path) -> dict[str, list[dict]]:
-    """Skills 디렉터리에서 Stage 1 대상 파일을 로드.
+    """Skills 디렉터리의 모든 *.md 파일을 로드.
 
     Returns:
         {
@@ -51,10 +61,10 @@ def load_skills(skills_dir: str | Path) -> dict[str, list[dict]]:
     rules: list[dict] = []
     templates: list[dict] = []
 
-    for filename in _STAGE1_SKILLS:
-        path = skills_path / filename
-        if not path.exists():
-            continue
+    if not skills_path.is_dir():
+        return {"rules": rules, "templates": templates}
+
+    for path in _ordered_skill_files(skills_path):
         text = path.read_text(encoding="utf-8")
         for block in parse_yaml_blocks(text):
             items = block if isinstance(block, list) else [block]
