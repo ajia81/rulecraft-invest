@@ -67,15 +67,8 @@ def _eval_node(node: ast.AST, values: dict[str, Any]) -> Any:
     raise ValueError(f"unsupported AST node: {type(node).__name__}")
 
 
-def evaluate_expression(expr: str, values: dict[str, Any]) -> bool:
-    """단일 비교식을 평가.
-
-    예: "rsi_14 > 80", "close > ma_20", "limit_side == 'upper'", "abs_funding_rate > 0.03"
-
-    NaN 처리 (Stage 2-1B):
-    - 좌변 또는 우변이 NaN/None이면 즉시 False 반환.
-    - 비교 자체가 TypeError(예: 문자열 vs 숫자)면 False 반환.
-    """
+def _evaluate_expression_bool(expr: str, values: dict[str, Any]) -> bool:
+    """단일 비교식을 평가하여 bool 반환. trace 모드 없음."""
     tree = ast.parse(expr.strip(), mode="eval")
     body = tree.body
     if not isinstance(body, ast.Compare):
@@ -101,31 +94,109 @@ def evaluate_expression(expr: str, values: dict[str, Any]) -> bool:
     return True
 
 
-def evaluate_conditions(rule: dict, values: dict[str, Any]) -> bool:
+def evaluate_expression(
+    expr: str, values: dict[str, Any], trace: bool = False
+):
+    """단일 비교식을 평가.
+
+    예: "rsi_14 > 80", "close > ma_20", "limit_side == 'upper'", "abs_funding_rate > 0.03"
+
+    NaN 처리 (Stage 2-1B):
+    - 좌변 또는 우변이 NaN/None이면 즉시 False 반환.
+    - 비교 자체가 TypeError(예: 문자열 vs 숫자)면 False 반환.
+
+    trace 모드 (Stage 3-2):
+    - trace=False (기본): bool 반환. 하위 호환.
+    - trace=True: dict 반환. 다음 키:
+        expression (str), passed (bool), bindings (dict[str, Any]),
+        skip_reason (str | absent — KeyError 발생 시만)
+    """
+    if not trace:
+        return _evaluate_expression_bool(expr, values)
+
+    tree = ast.parse(expr.strip(), mode="eval")
+    bindings: dict[str, Any] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in values:
+            bindings[node.id] = values[node.id]
+
+    try:
+        passed = _evaluate_expression_bool(expr, values)
+        return {
+            "expression": expr,
+            "passed": passed,
+            "bindings": bindings,
+        }
+    except KeyError as e:
+        return {
+            "expression": expr,
+            "passed": False,
+            "bindings": bindings,
+            "skip_reason": f"missing variable: {e}",
+        }
+
+
+def evaluate_conditions(
+    rule: dict, values: dict[str, Any], trace: bool = False
+):
     """rule['conditions']의 all_of(AND)와 any_of(OR)를 함께 평가.
 
     - all_of만 있으면: 모든 표현식이 True여야 True.
     - any_of만 있으면: 하나 이상의 표현식이 True면 True.
     - 둘 다 있으면: all_of AND any_of (둘 다 통과해야 True).
     - 둘 다 없으면: True (조건 없는 룰은 항상 매칭).
+
+    trace 모드 (Stage 3-2):
+    - trace=False (기본): bool 반환.
+    - trace=True: dict 반환. 키:
+        passed (bool),
+        all_of_traces (list[expression trace dict]),
+        any_of_traces (list[expression trace dict]),
+        all_of_passed (bool),
+        any_of_passed (bool | None — any_of가 없으면 None),
     """
     conditions = rule.get("conditions") or {}
     all_of = conditions.get("all_of") or []
     any_of = conditions.get("any_of") or []
 
-    if not all_of and not any_of:
+    if not trace:
+        if not all_of and not any_of:
+            return True
+        if all_of:
+            for expr in all_of:
+                if not evaluate_expression(expr, values):
+                    return False
+        if any_of:
+            if not any(evaluate_expression(expr, values) for expr in any_of):
+                return False
         return True
 
-    if all_of:
-        for expr in all_of:
-            if not evaluate_expression(expr, values):
-                return False
+    # trace 모드
+    all_of_traces = [evaluate_expression(e, values, trace=True) for e in all_of]
+    any_of_traces = [evaluate_expression(e, values, trace=True) for e in any_of]
 
-    if any_of:
-        if not any(evaluate_expression(expr, values) for expr in any_of):
-            return False
+    all_of_passed = all(t["passed"] for t in all_of_traces) if all_of_traces else True
+    any_of_passed: bool | None
+    if any_of_traces:
+        any_of_passed = any(t["passed"] for t in any_of_traces)
+    else:
+        any_of_passed = None
 
-    return True
+    if any_of_passed is None:
+        passed = all_of_passed
+    else:
+        passed = all_of_passed and any_of_passed
+
+    if not all_of and not any_of:
+        passed = True  # 조건 없는 룰은 항상 매칭
+
+    return {
+        "passed": passed,
+        "all_of_traces": all_of_traces,
+        "any_of_traces": any_of_traces,
+        "all_of_passed": all_of_passed,
+        "any_of_passed": any_of_passed,
+    }
 
 
 def _merge_extend(base_rule: dict, extend_rules: list[dict]) -> dict:

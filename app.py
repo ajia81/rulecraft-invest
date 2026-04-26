@@ -9,7 +9,9 @@ Stage 2-2: 다중 자산군 지원 (crypto, stock_kr).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -120,21 +122,91 @@ def _latest_values(df: pd.DataFrame, indicators: dict[str, pd.Series]) -> dict:
     return values
 
 
-def _evaluate_rule(
-    rule: dict, df: pd.DataFrame
-) -> tuple[bool, dict]:
-    """단일 룰을 데이터에 대해 평가. 인디케이터/조건 오류는 미매칭으로 처리."""
+def _evaluate_rule(rule: dict, df: pd.DataFrame, trace: bool = False):
+    """단일 룰을 데이터에 대해 평가. 인디케이터/조건 오류는 미매칭으로 처리.
+
+    trace=False (기본): (matched: bool, values: dict) 2-tuple 반환 (하위 호환).
+    trace=True: (matched: bool, values: dict, condition_trace: dict) 3-tuple 반환.
+        condition_trace는 evaluate_conditions(trace=True)의 dict 또는
+        인디케이터 계산 실패 시 {"passed": False, "skip_reason": "..."}.
+    """
     try:
         indicators = compute_required_indicators(rule, df)
-    except (NotImplementedError, KeyError, ValueError):
+    except (NotImplementedError, KeyError, ValueError) as e:
+        if trace:
+            return False, {}, {
+                "passed": False,
+                "skip_reason": f"인디케이터 계산 실패: {e}",
+            }
         return False, {}
 
     values = _latest_values(df, indicators)
+
+    if trace:
+        try:
+            condition_trace = evaluate_conditions(rule, values, trace=True)
+        except (KeyError, ValueError) as e:
+            condition_trace = {
+                "passed": False,
+                "skip_reason": f"조건 평가 실패: {e}",
+            }
+        return condition_trace["passed"], values, condition_trace
+
     try:
         matched = evaluate_conditions(rule, values)
     except (KeyError, ValueError):
         return False, values
     return matched, values
+
+
+def _format_value(value: Any) -> str:
+    """트레이스 표시용 값 포맷팅. NaN → 'NaN', 문자열 → 따옴표, 정수/실수 정규화."""
+    if value is None:
+        return "NaN"
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        return f"'{value}'"
+    try:
+        if pd.isna(value):
+            return "NaN"
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        if value.is_integer() and abs(value) < 1e16:
+            return f"{int(value):,}"
+        if abs(value) >= 1000:
+            return f"{value:,.2f}"
+        return f"{value:.2f}"
+    return str(value)
+
+
+def _format_expression_natural(trace_dict: dict) -> str:
+    """표현식에 변수 값을 inline 주석으로 삽입.
+
+    예: {"expression": "rsi_14 > 80", "bindings": {"rsi_14": 100.0}}
+        → "rsi_14 (=100) > 80"
+    """
+    expr = trace_dict.get("expression", "")
+    bindings = trace_dict.get("bindings") or {}
+    out = expr
+    for name in sorted(bindings.keys(), key=len, reverse=True):
+        formatted = _format_value(bindings[name])
+        out = re.sub(rf"\b{re.escape(name)}\b", f"{name} (={formatted})", out)
+    return out
+
+
+def _find_first_block_text(trace: dict) -> str:
+    """미매칭 룰의 1차 차단 조건 자연어. all_of 우선, 없으면 any_of 전체 실패."""
+    for t in trace.get("all_of_traces") or []:
+        if not t["passed"]:
+            return f"{_format_expression_natural(t)} → 실패"
+    if trace.get("any_of_traces"):
+        if not any(t["passed"] for t in trace["any_of_traces"]):
+            return "any_of 전체 실패"
+    return "(차단 조건 식별 불가)"
 
 
 def _build_chart(df: pd.DataFrame) -> go.Figure:
@@ -231,6 +303,100 @@ def _render_insight_card(rule: dict, text: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+_TRACE_PASS_COLOR = "#06b6d4"
+_TRACE_FAIL_COLOR = "#6b7280"
+
+
+def _trace_line_html(passed: bool, text: str) -> str:
+    color = _TRACE_PASS_COLOR if passed else _TRACE_FAIL_COLOR
+    icon = "✅" if passed else "✗"
+    return (
+        f"<div style='color:{color}; padding:3px 0 3px 12px; "
+        f"font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:13px;'>"
+        f"{icon} {text}</div>"
+    )
+
+
+def _render_matched_rule_trace(rule: dict, trace: dict) -> None:
+    rid = rule.get("rule_id", "?")
+    sev = rule.get("severity", "info")
+    sev_color = SEVERITY_COLORS.get(sev, SEVERITY_COLORS["info"])
+
+    header = (
+        f"<div style='margin: 8px 0 4px 0;'>"
+        f"<span style='color:{_TRACE_PASS_COLOR}; font-weight:700; font-size:14px;'>✅ {rid}</span>"
+        f"<span style='color:{sev_color}; font-size:11px; padding:1px 6px; "
+        f"border:1px solid {sev_color}; border-radius:4px; margin-left:8px;'>{sev}</span>"
+        f"</div>"
+    )
+    st.markdown(header, unsafe_allow_html=True)
+
+    if trace.get("skip_reason"):
+        st.markdown(_trace_line_html(False, trace["skip_reason"]), unsafe_allow_html=True)
+        return
+
+    for t in trace.get("all_of_traces") or []:
+        line = _format_expression_natural(t)
+        verdict = "통과" if t["passed"] else "실패"
+        st.markdown(_trace_line_html(t["passed"], f"{line} → {verdict} (all_of)"), unsafe_allow_html=True)
+    for t in trace.get("any_of_traces") or []:
+        line = _format_expression_natural(t)
+        verdict = "통과" if t["passed"] else "실패"
+        st.markdown(_trace_line_html(t["passed"], f"{line} → {verdict} (any_of)"), unsafe_allow_html=True)
+
+
+def _render_unmatched_rule_summary(rule: dict, trace: dict) -> None:
+    rid = rule.get("rule_id", "?")
+    sev = rule.get("severity", "?")
+    if trace.get("skip_reason"):
+        block = trace["skip_reason"]
+    else:
+        block = f"1차 차단 조건: {_find_first_block_text(trace)}"
+    st.markdown(
+        f"<div style='color:{_TRACE_FAIL_COLOR}; font-size:13px; padding:4px 0;'>"
+        f"✗ <span style='font-weight:600;'>{rid}</span> — {block} "
+        f"<span style='opacity:0.75;'>| severity: {sev}</span></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_trace_section(rule_traces: list[tuple[dict, bool, dict]]) -> None:
+    """차트 아래 '룰 평가 결과' 섹션. 매칭 룰 자세히 + 미매칭 룰 요약."""
+    matched = [(r, t) for r, m, t in rule_traces if m]
+    unmatched = [(r, t) for r, m, t in rule_traces if not m]
+
+    st.markdown(
+        f"""
+        <div style="margin: 20px 0 8px 0; display:flex; align-items:baseline; flex-wrap:wrap; gap:12px;">
+            <span style="color:#fafafa; font-weight:700; font-size:18px;">룰 평가 결과</span>
+            <span style="color:#6c7080; font-size:13px;">이 시스템은 모든 룰을 평가합니다. 매칭된 룰만 인사이트로 표시됩니다.</span>
+            <span style="color:#9ca3af; font-size:13px; margin-left:auto;">매칭 {len(matched)} / 미매칭 {len(unmatched)} (총 {len(rule_traces)})</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if matched:
+        st.markdown(
+            f"<div style='color:{_TRACE_PASS_COLOR}; font-weight:600; font-size:13px; "
+            f"text-transform:uppercase; letter-spacing:0.06em; margin: 14px 0 4px 0;'>"
+            f"매칭된 룰</div>",
+            unsafe_allow_html=True,
+        )
+        for rule, trace in matched:
+            _render_matched_rule_trace(rule, trace)
+
+    if unmatched:
+        st.markdown(
+            f"<div style='color:{_TRACE_FAIL_COLOR}; font-weight:600; font-size:13px; "
+            f"text-transform:uppercase; letter-spacing:0.06em; margin: 18px 0 4px 0;'>"
+            f"미매칭 룰</div>",
+            unsafe_allow_html=True,
+        )
+        for rule, trace in unmatched:
+            _render_unmatched_rule_summary(rule, trace)
 
 
 def _render_insight_cards(matches: list[tuple[dict, str, int]]) -> None:
@@ -337,8 +503,10 @@ def main() -> None:
     templates = skills["templates"]
 
     matches: list[tuple[dict, str, int]] = []
+    rule_traces: list[tuple[dict, bool, dict]] = []
     for idx, rule in enumerate(merged):
-        matched, values = _evaluate_rule(rule, df)
+        matched, values, condition_trace = _evaluate_rule(rule, df, trace=True)
+        rule_traces.append((rule, matched, condition_trace))
         if not matched:
             continue
         tpl = find_template(templates, rule["rule_id"], available_keys=set(values))
@@ -363,6 +531,8 @@ def main() -> None:
     _render_insight_cards(matches)
 
     st.plotly_chart(_build_chart(df), width="stretch")
+
+    _render_trace_section(rule_traces)
 
 
 if __name__ == "__main__":
