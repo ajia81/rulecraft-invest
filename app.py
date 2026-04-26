@@ -41,10 +41,33 @@ ASSET_NAME_OVERRIDES = {
 REQUIRED_COLUMNS = ("date", "open", "high", "low", "close", "volume")
 
 SEVERITY_COLORS = {
-    "info": "#00d4ff",
-    "warn": "#ffb454",
-    "alert": "#ff5577",
+    "critical": "#dc2626",
+    "alert": "#dc2626",  # legacy alias for critical
+    "warn": "#f59e0b",
+    "info": "#06b6d4",
 }
+
+SEVERITY_RANK = {
+    "critical": 0,
+    "alert": 0,
+    "warn": 1,
+    "info": 2,
+}
+
+_INFO_RANK = SEVERITY_RANK["info"]
+
+
+def _sort_key(match: tuple[dict, str, int]) -> tuple[int, int, int]:
+    """카드 정렬 우선순위.
+
+    1. severity rank: critical(0) > warn(1) > info(2)
+    2. asset_only 룰을 같은 severity 내에서 위로
+    3. 룰 평가 순서(원래 인덱스)
+    """
+    rule, _text, eval_idx = match
+    sev_rank = SEVERITY_RANK.get(rule.get("severity", "info"), _INFO_RANK)
+    is_not_asset_only = 0 if rule.get("merge_policy") == "asset_only" else 1
+    return (sev_rank, is_not_asset_only, eval_idx)
 
 
 def _resolve_asset_name(file_name: str) -> str:
@@ -175,9 +198,10 @@ def _build_chart(df: pd.DataFrame) -> go.Figure:
 
 
 def _render_insight_card(rule: dict, text: str) -> None:
+    """단일 인사이트 카드. compact 형식, severity 좌측 보더 + 상단 메타라인."""
     severity = rule.get("severity", "info")
-    color = SEVERITY_COLORS.get(severity, "#00d4ff")
-    signal = rule.get("signal", "")
+    color = SEVERITY_COLORS.get(severity, SEVERITY_COLORS["info"])
+    signal = rule.get("signal") or rule.get("rule_id", "")
     rule_name = rule.get("rule_name", rule.get("rule_id", ""))
 
     st.markdown(
@@ -185,28 +209,47 @@ def _render_insight_card(rule: dict, text: str) -> None:
         <div style="
             background: #1e2029;
             border-left: 4px solid {color};
-            border-radius: 6px;
-            padding: 18px 22px;
-            margin: 8px 0 16px 0;
+            border-radius: 8px;
+            padding: 16px;
+            margin: 0 0 10px 0;
         ">
-            <div style="display:flex; align-items:center; gap:14px; margin-bottom:10px; flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px; flex-wrap:wrap;">
                 <span style="
                     color: {color};
                     font-weight: 700;
-                    font-size: 12px;
+                    font-size: 11px;
                     letter-spacing: 0.08em;
                     text-transform: uppercase;
                 ">{severity}</span>
-                <span style="color: #fafafa; font-weight: 600; font-size: 16px;">{rule_name}</span>
-                <span style="color: #6c7080; font-size: 13px;">signal: {signal}</span>
+                <span style="color: #fafafa; font-weight: 600; font-size: 15px;">{signal}</span>
+                <span style="color: #6c7080; font-size: 12px;">{rule_name}</span>
             </div>
-            <div style="color: #d8dde6; font-size: 15px; line-height: 1.65;">
+            <div style="color: #d8dde6; font-size: 14px; line-height: 1.6;">
                 {text}
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _render_insight_cards(matches: list[tuple[dict, str, int]]) -> None:
+    """매칭된 모든 룰을 정렬 우선순위에 따라 카드로 렌더링."""
+    if not matches:
+        st.markdown(
+            """
+            <div style="
+                background:#1e2029; border-radius:8px; padding:16px;
+                color:#6c7080; font-size:14px; text-align:center; margin: 0 0 10px 0;
+            ">
+                분석 실행 후 매칭된 신호가 없습니다. 데이터 범위 또는 Skills 룰의 임계값을 조정해 보세요.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+    for rule, text, _idx in matches:
+        _render_insight_card(rule, text)
 
 
 def _render_header(
@@ -293,8 +336,8 @@ def main() -> None:
     merged = merge_rules(skills["rules"], asset_type=asset_type)
     templates = skills["templates"]
 
-    matches: list[tuple[dict, str]] = []
-    for rule in merged:
+    matches: list[tuple[dict, str, int]] = []
+    for idx, rule in enumerate(merged):
         matched, values = _evaluate_rule(rule, df)
         if not matched:
             continue
@@ -305,31 +348,19 @@ def main() -> None:
             text = render_insight(tpl["text"], values)
         except (KeyError, ValueError):
             continue
-        matches.append((rule, text))
+        matches.append((rule, text, idx))
+
+    matches.sort(key=_sort_key)
 
     last_date = df["date"].iloc[-1].strftime("%Y-%m-%d")
     last_close = float(df["close"].iloc[-1])
-    signals = [r.get("signal", "") for r, _ in matches]
+    signals = [r.get("signal", "") for r, _, _ in matches]
     asset_name = _resolve_asset_name(source_name)
 
     _render_header(asset_name, last_date, last_close, signals)
     st.divider()
 
-    if matches:
-        rule, text = matches[0]
-        _render_insight_card(rule, text)
-    else:
-        st.markdown(
-            """
-            <div style="
-                background:#1e2029; border-radius:6px; padding:18px 22px;
-                color:#6c7080; font-size:14px; text-align:center; margin: 8px 0 16px 0;
-            ">
-                현재 룰에 매칭된 신호가 없습니다. 데이터 범위 또는 Skills 룰의 임계값을 조정해 보세요.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    _render_insight_cards(matches)
 
     st.plotly_chart(_build_chart(df), width="stretch")
 

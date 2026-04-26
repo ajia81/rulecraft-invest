@@ -252,7 +252,7 @@ base의 추천 행동을 그대로 따릅니다.
     all_of:
       - "foreign_net_buy_zscore > 2.0"
   signal: foreign_net_buying_surge
-  severity: info
+  severity: warn
   visualization: viz_foreign_net_buying_surge
   template_variables:
     - foreign_net_buy
